@@ -98,6 +98,15 @@ async function start() {
             return result.seq;
         }
 
+        async function getNextReviewId() {
+            const result = await countersCol.findOneAndUpdate(
+                { _id: 'reviewId' },
+                { $inc: { seq: 1 } },
+                { upsert: true, returnDocument: 'after' }
+            );
+            return result.seq;
+        }
+
         // --- SHOP ROUTES ---
         app.get('/api/shops', async (req, res) => {
             try {
@@ -433,6 +442,92 @@ async function start() {
                 res.json({ message: "User permanently removed." });
             } catch (err) {
                 res.status(500).json({ error: "Failed to delete user." });
+            }
+        });
+
+        // --- PUBLIC REVIEW ROUTES ---
+        app.post('/api/shops/:id/review', authenticateToken, upload.array('photos'), async (req, res) => {
+            try {
+                const shopId = parseInt(req.params.id);
+                const { rating, text } = req.body;
+                const user = await usersCol.findOne({ email: req.user.email });
+
+                if (!user) return res.status(404).json({ error: "User not found" });
+
+                const reviewId = await getNextReviewId();
+                const uploadedUrls = [];
+
+                // 1. Upload Photos to Cloudinary
+                if (req.files && req.files.length > 0) {
+                    for (let i = 0; i < req.files.length; i++) {
+                        const file = req.files[i];
+                        const b64 = Buffer.from(file.buffer).toString("base64");
+                        let dataURI = "data:" + file.mimetype + ";base64," + b64;
+
+                        const result = await cloudinary.uploader.upload(dataURI, {
+                            folder: `shops/id_${shopId}/reviews`,
+                            public_id: `rev_${reviewId}_${i + 1}`,
+                            overwrite: true,
+                            transformation: [
+                                { width: 1000, crop: "limit" },
+                                { quality: "auto" },
+                                { fetch_format: "auto" }
+                            ]
+                        });
+                        uploadedUrls.push(result.secure_url);
+                    }
+                }
+
+                const newReview = {
+                    id: reviewId,
+                    userId: user.userId,
+                    name: user.fullName,
+                    init: user.fullName.charAt(0).toUpperCase(),
+                    rating: parseInt(rating),
+                    date: "Just now",
+                    text: text,
+                    photos: uploadedUrls,
+                    helpful: 0,
+                    voted: false
+                };
+
+                console.log("\n🚀 --- POSTING NEW REVIEW ---");
+                console.log(`📍 Shop ID: ${shopId}`);
+                console.log(`👤 User: ${user.fullName} (ID: ${user.userId})`);
+                console.log(`📝 Review Content: "${text}"`);
+                console.log(`⭐ Rating: ${rating}`);
+                console.log(`🖼️ Photos Attached: ${uploadedUrls.length}`);
+                
+                // 2. Update Shop Collection
+                const shopUpdate = {
+                    $push: { 
+                        reviews: { $each: [newReview], $position: 0 },
+                        images: { $each: uploadedUrls } 
+                    }
+                };
+
+                // Check if coverImg needs setting
+                const targetShop = await shopsCol.findOne({ id: shopId });
+                if (targetShop && (!targetShop.coverImg || targetShop.coverImg === '') && uploadedUrls.length > 0) {
+                    shopUpdate.$set = { coverImg: uploadedUrls[0] };
+                    console.log(`🖼️ Setting first review photo as coverImg for Shop #${shopId}`);
+                }
+
+                await shopsCol.updateOne({ id: shopId }, shopUpdate);
+
+                // 3. Update User Collection
+                await usersCol.updateOne(
+                    { userId: user.userId },
+                    { $push: { myReviews: reviewId } }
+                );
+
+                console.log(`✅ Database modified successfully for Shop #${shopId} and User #${user.userId}\n`);
+
+                res.json({ success: true, review: newReview });
+
+            } catch (err) {
+                console.error("Review posting error:", err);
+                res.status(500).json({ error: "Failed to post review." });
             }
         });
 
