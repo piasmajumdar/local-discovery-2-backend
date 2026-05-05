@@ -256,10 +256,17 @@ async function start() {
                 if (!user) {
                     return res.status(404).json({ error: "User not found." });
                 }
-                // Return User data (excluding sensitive fields)
+
+                // Fetch actual shop documents for the IDs in addedShops
+                const myShops = await shopsCol.find({ 
+                    id: { $in: user.addedShops || [] } 
+                }).toArray();
+
+                // Return User data (including populated shops)
                 const { password, otp, otpExpires, ...userData } = user;
-                res.json(userData);
+                res.json({ ...userData, myShops });
             } catch (err) {
+                console.error("Profile fetch error:", err);
                 res.status(500).json({ error: "Failed to fetch profile." });
             }
         });
