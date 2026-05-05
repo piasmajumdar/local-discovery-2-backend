@@ -28,7 +28,13 @@ async function start() {
 
         // Indexes
         await usersCol.createIndex({ email: 1 }, { unique: true });
-        await usersCol.createIndex({ userId: 1 }, { unique: true });
+        // Make userId index sparse so unverified users (with no userId yet) don't conflict
+        try {
+            await usersCol.dropIndex("userId_1");
+        } catch (e) {
+            // Index might not exist yet
+        }
+        await usersCol.createIndex({ userId: 1 }, { unique: true, sparse: true });
 
         // Helper: Generate Unique User ID
         async function getNextUserId() {
@@ -112,8 +118,9 @@ async function start() {
                     { upsert: true }
                 );
 
-                const { error } = await resend.emails.send({
-                    from: 'Local Discovery <onboarding@resend.dev>',
+                console.log("Attempting to send email from:", process.env.SENDER_EMAIL || 'onboarding@resend.dev');
+                const { data, error } = await resend.emails.send({
+                    from: process.env.SENDER_EMAIL || 'Local Discovery <onboarding@resend.dev>',
                     to: [email],
                     subject: 'Verify your Local Discovery Account',
                     html: `<div style="font-family: sans-serif; padding: 20px;">
@@ -122,10 +129,15 @@ async function start() {
                            </div>`
                 });
 
-                if (error) return res.status(500).json({ error: "Email failed." });
+                if (error) {
+                    console.error("Resend API Error:", error);
+                    return res.status(500).json({ error: "Email failed." });
+                }
 
+                console.log("Email sent successfully:", data);
                 res.status(200).json({ message: "OTP sent!" });
             } catch (err) {
+                console.error("Signup Database/Logic Error:", err);
                 res.status(500).json({ error: "Signup failed." });
             }
         });
