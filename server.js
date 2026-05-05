@@ -21,7 +21,7 @@ async function start() {
         await client.connect();
         console.log("Connected to MongoDB Atlas");
         const db = client.db(process.env.MONGODB_DB);
-
+        
         const shopsCol = db.collection('shops');
         const usersCol = db.collection('users');
         const countersCol = db.collection('counters');
@@ -43,46 +43,25 @@ async function start() {
         // --- SHOP ROUTES ---
         app.get('/api/shops', async (req, res) => {
             try {
-                const { lat, lng, radius, q, page = 1, limit = 20 } = req.query;
-                
+                const { lat, lng, radius } = req.query;
                 if (!lat || !lng) {
-                    return res.status(400).json({ error: "Location (lat, lng) is required." });
+                    const shops = await shopsCol.find({}).limit(100).toArray();
+                    return res.json(shops);
                 }
-
                 const latitude = parseFloat(lat);
                 const longitude = parseFloat(lng);
                 const maxDistance = parseInt(radius) || 40000;
-                const skip = (parseInt(page) - 1) * parseInt(limit);
 
-                // Start with geospatial filter
-                let query = {
+                const shops = await shopsCol.find({
                     location: {
                         $near: {
                             $geometry: { type: "Point", coordinates: [longitude, latitude] },
                             $maxDistance: maxDistance
                         }
                     }
-                };
-
-                // Add keyword search (burger, cafe, etc.)
-                if (q) {
-                    const searchRegex = new RegExp(q, 'i');
-                    query.$or = [
-                        { name: searchRegex },
-                        { category: searchRegex },
-                        { tags: searchRegex },
-                        { "products.name": searchRegex }
-                    ];
-                }
-
-                const shops = await shopsCol.find(query)
-                    .skip(skip)
-                    .limit(parseInt(limit))
-                    .toArray();
-
+                }).toArray();
                 res.json(shops);
             } catch (err) {
-                console.error("Search API Error:", err);
                 res.status(500).json({ error: "Internal Server Error" });
             }
         });
@@ -116,19 +95,19 @@ async function start() {
                 // Upsert unverified user
                 await usersCol.updateOne(
                     { email },
-                    {
-                        $set: {
-                            fullName,
-                            password: hashedPassword,
-                            otp,
-                            otpExpires,
+                    { 
+                        $set: { 
+                            fullName, 
+                            password: hashedPassword, 
+                            otp, 
+                            otpExpires, 
                             isVerified: false,
                             photo: "", // Placeholder for Cloudinary URL
-                            addedShops: [],
+                            addedShops: [], 
                             myReviews: [],
                             role: "user",
                             createdAt: new Date()
-                        }
+                        } 
                     },
                     { upsert: true }
                 );
@@ -165,7 +144,7 @@ async function start() {
 
                 await usersCol.updateOne(
                     { email },
-                    {
+                    { 
                         $set: { isVerified: true, userId },
                         $unset: { otp: "", otpExpires: "" }
                     }
