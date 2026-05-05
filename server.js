@@ -323,6 +323,119 @@ async function start() {
             }
         });
 
+        // --- ADMIN MIDDLEWARE ---
+        const isAdmin = async (req, res, next) => {
+            try {
+                const user = await usersCol.findOne({ email: req.user.email });
+                if (user && user.role === 'admin') {
+                    next();
+                } else {
+                    res.status(403).json({ error: "Access denied. Admins only." });
+                }
+            } catch (err) {
+                res.status(500).json({ error: "Admin check failed." });
+            }
+        };
+
+        // --- ADMIN ROUTES ---
+
+        // 1. Get Overall Stats
+        app.get('/api/admin/stats', authenticateToken, isAdmin, async (req, res) => {
+            try {
+                const totalShops = await shopsCol.countDocuments();
+                const pendingShops = await shopsCol.countDocuments({ isVerifiedByAdmin: false });
+                const totalUsers = await usersCol.countDocuments();
+                
+                // Group shops by category for analytics
+                const categoryStats = await shopsCol.aggregate([
+                    { $group: { _id: "$category", count: { $sum: 1 } } },
+                    { $sort: { count: -1 } }
+                ]).toArray();
+
+                res.json({
+                    totalShops,
+                    pendingShops,
+                    totalUsers,
+                    categoryStats
+                });
+            } catch (err) {
+                res.status(500).json({ error: "Failed to fetch admin stats." });
+            }
+        });
+
+        // 2. Get Pending Shops
+        app.get('/api/admin/pending-shops', authenticateToken, isAdmin, async (req, res) => {
+            try {
+                const shops = await shopsCol.find({ isVerifiedByAdmin: false }).toArray();
+                res.json(shops);
+            } catch (err) {
+                res.status(500).json({ error: "Failed to fetch pending shops." });
+            }
+        });
+
+        // 3. Approve a Shop
+        app.post('/api/admin/approve-shop/:id', authenticateToken, isAdmin, async (req, res) => {
+            try {
+                const shopId = parseInt(req.params.id);
+                const result = await shopsCol.updateOne(
+                    { id: shopId },
+                    { $set: { isVerifiedByAdmin: true } }
+                );
+
+                if (result.modifiedCount === 0) {
+                    return res.status(404).json({ error: "Shop not found or already verified." });
+                }
+
+                res.json({ success: true, message: "Shop approved successfully!" });
+            } catch (err) {
+                res.status(500).json({ error: "Approval failed." });
+            }
+        });
+
+        // 4. Get All Shops (Admin Only)
+        app.get('/api/admin/all-shops', authenticateToken, isAdmin, async (req, res) => {
+            try {
+                const shops = await shopsCol.find({}).sort({ id: -1 }).toArray();
+                res.json(shops);
+            } catch (err) {
+                res.status(500).json({ error: "Failed to fetch all shops." });
+            }
+        });
+
+        // 5. Get All Users (Admin Only)
+        app.get('/api/admin/users', authenticateToken, isAdmin, async (req, res) => {
+            try {
+                const users = await usersCol.find({}).project({ password: 0 }).sort({ fullName: 1 }).toArray();
+                res.json(users);
+            } catch (err) {
+                res.status(500).json({ error: "Failed to fetch users." });
+            }
+        });
+
+        // 6. Delete Shop (Admin Only)
+        app.delete('/api/admin/shop/:id', authenticateToken, isAdmin, async (req, res) => {
+            try {
+                const shopId = parseInt(req.params.id);
+                const result = await shopsCol.deleteOne({ id: shopId });
+                if (result.deletedCount === 0) return res.status(404).json({ error: "Shop not found" });
+                res.json({ message: "Shop permanently deleted." });
+            } catch (err) {
+                res.status(500).json({ error: "Failed to delete shop." });
+            }
+        });
+
+        // 7. Delete User (Admin Only)
+        app.delete('/api/admin/user/:id', authenticateToken, isAdmin, async (req, res) => {
+            try {
+                const userId = req.params.id;
+                const result = await usersCol.deleteOne({ _id: new (require('mongodb').ObjectId)(userId) });
+                if (result.deletedCount === 0) return res.status(404).json({ error: "User not found" });
+                res.json({ message: "User permanently removed." });
+            } catch (err) {
+                res.status(500).json({ error: "Failed to delete user." });
+            }
+        });
+
         app.listen(port, () => {
             console.log(`Backend running at http://localhost:${port}`);
         });
