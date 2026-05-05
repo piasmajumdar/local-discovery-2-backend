@@ -16,6 +16,19 @@ app.use(express.json());
 const uri = process.env.MONGODB_URI;
 const client = new MongoClient(uri);
 
+// --- MIDDLEWARE ---
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (!token) return res.status(401).json({ error: "Access denied. Token missing." });
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ error: "Invalid or expired token." });
+        req.user = user;
+        next();
+    });
+};
+
 async function start() {
     try {
         await client.connect();
@@ -194,6 +207,21 @@ async function start() {
                 res.json({ token, user: userData });
             } catch (err) {
                 res.status(500).json({ error: "Login failed." });
+            }
+        });
+
+        // 4. GET CURRENT USER
+        app.get('/api/auth/me', authenticateToken, async (req, res) => {
+            try {
+                const user = await usersCol.findOne({ email: req.user.email });
+                if (!user) {
+                    return res.status(404).json({ error: "User not found." });
+                }
+                // Return User data (excluding sensitive fields)
+                const { password, otp, otpExpires, ...userData } = user;
+                res.json(userData);
+            } catch (err) {
+                res.status(500).json({ error: "Failed to fetch profile." });
             }
         });
 
