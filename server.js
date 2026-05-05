@@ -4,11 +4,17 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Resend } = require('resend');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 5000;
 const resend = new Resend(process.env.RESEND_API_KEY);
+
+// Multer Configuration (Memory Storage)
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
 
 app.use(cors());
 app.use(express.json());
@@ -31,13 +37,37 @@ const authenticateToken = (req, res, next) => {
 
 async function start() {
     try {
+        // Cloudinary Configuration
+        cloudinary.config({
+            cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+            api_key: process.env.CLOUDINARY_API_KEY,
+            api_secret: process.env.CLOUDINARY_API_SECRET
+        });
+
+
         await client.connect();
         console.log("Connected to MongoDB Atlas");
         const db = client.db(process.env.MONGODB_DB);
-        
+        console.log("📂 Target Database:", db.databaseName);
+
         const shopsCol = db.collection('shops');
         const usersCol = db.collection('users');
         const countersCol = db.collection('counters');
+
+        // Helper: Sync Shop ID Counter with existing data
+        async function syncShopCounter() {
+            const lastShop = await shopsCol.find().sort({ id: -1 }).limit(1).toArray();
+            if (lastShop.length > 0) {
+                const highestId = lastShop[0].id;
+                await countersCol.updateOne(
+                    { _id: 'shopId' },
+                    { $set: { seq: highestId } },
+                    { upsert: true }
+                );
+                console.log(`📡 Shop ID counter synchronized to: ${highestId}`);
+            }
+        }
+        await syncShopCounter();
 
         // Indexes
         await usersCol.createIndex({ email: 1 }, { unique: true });
@@ -59,28 +89,37 @@ async function start() {
             return result.seq;
         }
 
+        async function getNextShopId() {
+            const result = await countersCol.findOneAndUpdate(
+                { _id: 'shopId' },
+                { $inc: { seq: 1 } },
+                { upsert: true, returnDocument: 'after' }
+            );
+            return result.seq;
+        }
+
         // --- SHOP ROUTES ---
         app.get('/api/shops', async (req, res) => {
             try {
                 const { lat, lng, radius } = req.query;
-                if (!lat || !lng) {
-                    const shops = await shopsCol.find({}).limit(100).toArray();
-                    return res.json(shops);
-                }
-                const latitude = parseFloat(lat);
-                const longitude = parseFloat(lng);
-                const maxDistance = parseInt(radius) || 40000;
+                const query = { isVerifiedByAdmin: true };
 
-                const shops = await shopsCol.find({
-                    location: {
+                if (lat && lng) {
+                    const latitude = parseFloat(lat);
+                    const longitude = parseFloat(lng);
+                    const maxDistance = parseInt(radius) || 40000;
+                    query.location = {
                         $near: {
                             $geometry: { type: "Point", coordinates: [longitude, latitude] },
                             $maxDistance: maxDistance
                         }
-                    }
-                }).toArray();
+                    };
+                }
+
+                const shops = await shopsCol.find(query).limit(100).toArray();
                 res.json(shops);
             } catch (err) {
+                console.error("Fetch shops error:", err);
                 res.status(500).json({ error: "Internal Server Error" });
             }
         });
@@ -114,19 +153,19 @@ async function start() {
                 // Upsert unverified user
                 await usersCol.updateOne(
                     { email },
-                    { 
-                        $set: { 
-                            fullName, 
-                            password: hashedPassword, 
-                            otp, 
-                            otpExpires, 
+                    {
+                        $set: {
+                            fullName,
+                            password: hashedPassword,
+                            otp,
+                            otpExpires,
                             isVerified: false,
                             photo: "", // Placeholder for Cloudinary URL
-                            addedShops: [], 
+                            addedShops: [],
                             myReviews: [],
                             role: "user",
                             createdAt: new Date()
-                        } 
+                        }
                     },
                     { upsert: true }
                 );
@@ -169,7 +208,7 @@ async function start() {
 
                 await usersCol.updateOne(
                     { email },
-                    { 
+                    {
                         $set: { isVerified: true, userId },
                         $unset: { otp: "", otpExpires: "" }
                     }
@@ -222,6 +261,58 @@ async function start() {
                 res.json(userData);
             } catch (err) {
                 res.status(500).json({ error: "Failed to fetch profile." });
+            }
+        });
+
+        // --- FINAL SHOP LISTING ROUTE ---
+        app.post('/api/shops/add', upload.array('images'), async (req, res) => {
+            try {
+                const shopData = req.body.shopData ? JSON.parse(req.body.shopData) : req.body;
+                
+                // Get the official next shop ID
+                const shopId = await getNextShopId();
+                shopData.id = shopId;
+
+                const uploadedUrls = [];
+                for (let i = 0; i < req.files.length; i++) {
+                    const file = req.files[i];
+                    const b64 = Buffer.from(file.buffer).toString("base64");
+                    let dataURI = "data:" + file.mimetype + ";base64," + b64;
+
+                    const result = await cloudinary.uploader.upload(dataURI, {
+                        folder: `shops/id_${shopId}`,
+                        public_id: `${i + 1}`,
+                        overwrite: true,
+                        transformation: [
+                            { width: 1000, crop: "limit" },
+                            { quality: "auto" },
+                            { fetch_format: "auto" }
+                        ]
+                    });
+                    uploadedUrls.push(result.secure_url);
+                }
+
+                shopData.images = uploadedUrls;
+                shopData.coverImg = uploadedUrls[0] || '';
+
+                // 1. Save Shop to MongoDB
+                const insertResult = await shopsCol.insertOne(shopData);
+                console.log("📝 MongoDB Insert Result:", insertResult);
+
+                // 2. Update User's 'addedShops' list
+                if (shopData.userId && shopData.userId !== 'guest') {
+                    await usersCol.updateOne(
+                        { userId: shopData.userId },
+                        { $push: { addedShops: shopId } }
+                    );
+                }
+
+                console.log(`✅ Shop #${shopId} added successfully by User #${shopData.userId}`);
+                res.json({ success: true, message: "Shop listed successfully!", id: shopId });
+
+            } catch (err) {
+                console.error("❌ Shop Listing Error:", err);
+                res.status(500).json({ error: "Failed to list shop." });
             }
         });
 
