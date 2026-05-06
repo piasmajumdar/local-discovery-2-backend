@@ -107,6 +107,9 @@ async function start() {
             return result.seq;
         }
 
+        // --- Rate Limiter for Contact Form ---
+        const contactRateLimit = {};
+
         // --- SHOP ROUTES ---
         app.get('/api/shops', async (req, res) => {
             try {
@@ -267,8 +270,8 @@ async function start() {
                 }
 
                 // Fetch actual shop documents for the IDs in addedShops
-                const myShops = await shopsCol.find({ 
-                    id: { $in: user.addedShops || [] } 
+                const myShops = await shopsCol.find({
+                    id: { $in: user.addedShops || [] }
                 }).toArray();
 
                 // Return User data (including populated shops)
@@ -284,7 +287,7 @@ async function start() {
         app.post('/api/shops/add', upload.array('images'), async (req, res) => {
             try {
                 const shopData = req.body.shopData ? JSON.parse(req.body.shopData) : req.body;
-                
+
                 // Get the official next shop ID
                 const shopId = await getNextShopId();
                 shopData.id = shopId;
@@ -354,7 +357,7 @@ async function start() {
                 const totalShops = await shopsCol.countDocuments();
                 const pendingShops = await shopsCol.countDocuments({ isVerifiedByAdmin: false });
                 const totalUsers = await usersCol.countDocuments();
-                
+
                 // Group shops by category for analytics
                 const categoryStats = await shopsCol.aggregate([
                     { $group: { _id: "$category", count: { $sum: 1 } } },
@@ -497,12 +500,12 @@ async function start() {
                 console.log(`📝 Review Content: "${text}"`);
                 console.log(`⭐ Rating: ${rating}`);
                 console.log(`🖼️ Photos Attached: ${uploadedUrls.length}`);
-                
+
                 // 2. Update Shop Collection
                 const shopUpdate = {
-                    $push: { 
+                    $push: {
                         reviews: { $each: [newReview], $position: 0 },
-                        images: { $each: uploadedUrls } 
+                        images: { $each: uploadedUrls }
                     }
                 };
 
@@ -528,6 +531,89 @@ async function start() {
             } catch (err) {
                 console.error("Review posting error:", err);
                 res.status(500).json({ error: "Failed to post review." });
+            }
+        });
+
+        // --- CONTACT FORM RELAY (with Anti-Spam Fortress) ---
+        app.post('/api/contact', async (req, res) => {
+            try {
+                const { name, email, subject, message, bot_field } = req.body;
+                const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+                // 1. Honeypot Check (Bot Trap)
+                if (bot_field && bot_field.length > 0) {
+                    console.log(`🤖 Bot detected from IP: ${ip} (Honeypot triggered)`);
+                    return res.json({ success: true, message: "Thank you! Your message has been sent." }); // Fake success
+                }
+
+                // 2. Basic Validation
+                if (!name || !email || !message) {
+                    return res.status(400).json({ error: "Please fill in all required fields." });
+                }
+                if (message.length < 10) return res.status(400).json({ error: "Message is too short (min 10 chars)." });
+                if (message.length > 3000) return res.status(400).json({ error: "Message is too long (max 3000 chars)." });
+
+                // 3. IP-Based Rate Limiting (3 per hour)
+                const now = Date.now();
+                const hour = 60 * 60 * 1000;
+                if (!contactRateLimit[ip] || (now - contactRateLimit[ip].lastReset > hour)) {
+                    contactRateLimit[ip] = { count: 1, lastReset: now };
+                } else {
+                    if (contactRateLimit[ip].count >= 3) {
+                        console.log(`🛡️ Rate limit hit for IP: ${ip}`);
+                        return res.status(429).json({ error: "Too many messages. Please try again in an hour." });
+                    }
+                    contactRateLimit[ip].count++;
+                }
+
+                const accessKey = process.env.WEB3FORMS_ACCESS_KEY;
+                if (!accessKey) {
+                    console.error("❌ CRITICAL: WEB3FORMS_ACCESS_KEY is missing in .env!");
+                    return res.status(500).json({ error: "Server configuration error." });
+                }
+
+                // 4. Secure Forward to Web3Forms using FormData (Mirroring their official example)
+                const formData = new URLSearchParams();
+                formData.append("access_key", accessKey);
+                formData.append("name", name);
+                formData.append("email", email);
+                formData.append("subject", `[Local Discovery] ${subject || 'New Contact Request'}`);
+                formData.append("message", message);
+                formData.append("from_name", "Local Discovery Contact Portal");
+
+                // 4. Send via Resend (Bypassing Cloudflare blocks)
+                const { data, error } = await resend.emails.send({
+                    from: process.env.SENDER_EMAIL || 'Local Discovery Support <noreply@localdiscovery.online>',
+                    to: ['piasvitap02@gmail.com'], // Admin destination
+                    subject: `[Contact Form] ${subject || 'New Inquiry'} from ${name}`,
+                    reply_to: email, // Allows you to reply directly to the user
+                    html: `
+                        <div style="font-family: sans-serif; padding: 40px; background-color: #f8fafc; color: #1e293b;">
+                            <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 24px; padding: 32px; border: 1px solid #e2e8f0;">
+                                <h2 style="color: #ff8938; margin-top: 0;">New Message Received</h2>
+                                <p style="font-size: 14px; color: #64748b;">You have a new inquiry from the Local Discovery contact portal.</p>
+                                <div style="background: #f1f5f9; border-radius: 16px; padding: 20px; margin: 20px 0;">
+                                    <p><strong>Sender:</strong> ${name}</p>
+                                    <p><strong>Email:</strong> ${email}</p>
+                                    <p><strong>Subject:</strong> ${subject || 'No Subject'}</p>
+                                </div>
+                                <p style="white-space: pre-wrap;">${message}</p>
+                            </div>
+                        </div>
+                    `
+                });
+
+                if (error) {
+                    console.error("❌ Resend API Error:", error);
+                    throw new Error("Resend failed to deliver the message.");
+                }
+
+                console.log(`📧 Contact email sent successfully via Resend from: ${email}`);
+                res.json({ success: true, message: "Thank you! We have received your message." });
+
+            } catch (err) {
+                console.error("Contact Relay Error:", err);
+                res.status(500).json({ error: "Failed to send message. Please try again later." });
             }
         });
 
