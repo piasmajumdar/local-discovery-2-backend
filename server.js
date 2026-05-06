@@ -566,20 +566,11 @@ async function start() {
                     contactRateLimit[ip].count++;
                 }
 
-                const accessKey = process.env.WEB3FORMS_ACCESS_KEY;
-                if (!accessKey) {
-                    console.error("❌ CRITICAL: WEB3FORMS_ACCESS_KEY is missing in .env!");
-                    return res.status(500).json({ error: "Server configuration error." });
+                // 4. Send via Resend (Production-ready relay)
+                if (!process.env.RESEND_API_KEY) {
+                    console.error("❌ CRITICAL: RESEND_API_KEY is missing in .env!");
+                    return res.status(500).json({ error: "Server email configuration error." });
                 }
-
-                // 4. Secure Forward to Web3Forms using FormData (Mirroring their official example)
-                const formData = new URLSearchParams();
-                formData.append("access_key", accessKey);
-                formData.append("name", name);
-                formData.append("email", email);
-                formData.append("subject", `[Local Discovery] ${subject || 'New Contact Request'}`);
-                formData.append("message", message);
-                formData.append("from_name", "Local Discovery Contact Portal");
 
                 // 4. Send via Resend (Bypassing Cloudflare blocks)
                 const { data, error } = await resend.emails.send({
